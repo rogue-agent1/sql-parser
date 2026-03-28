@@ -1,64 +1,62 @@
 #!/usr/bin/env python3
-"""Minimal SQL parser and executor for in-memory tables."""
-import sys,re
-class DB:
-    def __init__(self): self.tables={}
-    def create(self,name,columns): self.tables[name]={"columns":columns,"rows":[]}
-    def insert(self,name,values): self.tables[name]["rows"].append(values)
-    def select(self,name,columns=None,where=None,order_by=None,limit=None):
-        t=self.tables[name];cols=t["columns"]
-        rows=t["rows"]
-        if where:
-            col,op,val=where
-            ci=cols.index(col)
-            if op=='=': rows=[r for r in rows if str(r[ci])==val]
-            elif op=='>': rows=[r for r in rows if r[ci]>float(val)]
-            elif op=='<': rows=[r for r in rows if r[ci]<float(val)]
-        if order_by:
-            ci=cols.index(order_by.lstrip('-'))
-            rows=sorted(rows,key=lambda r:r[ci],reverse=order_by.startswith('-'))
-        if limit: rows=rows[:limit]
-        if columns and columns!=['*']:
-            idxs=[cols.index(c) for c in columns]
-            return columns,[[r[i] for i in idxs] for r in rows]
-        return cols,rows
-def parse_execute(db,sql):
-    sql=sql.strip().rstrip(';')
-    if sql.upper().startswith('CREATE'):
-        m=re.match(r'CREATE TABLE (\w+)\s*\((.+)\)',sql,re.I)
-        if m: db.create(m[1],[c.strip().split()[0] for c in m[2].split(',')]);return "OK"
-    elif sql.upper().startswith('INSERT'):
-        m=re.match(r'INSERT INTO (\w+) VALUES\s*\((.+)\)',sql,re.I)
-        if m:
-            vals=[]
-            for v in m[2].split(','):
-                v=v.strip().strip("'\"")
-                try: vals.append(int(v))
-                except:
-                    try: vals.append(float(v))
-                    except: vals.append(v)
-            db.insert(m[1],vals);return "OK"
-    elif sql.upper().startswith('SELECT'):
-        m=re.match(r'SELECT (.+?) FROM (\w+)(?:\s+WHERE\s+(\w+)\s*(=|>|<)\s*(.+?))?(?:\s+ORDER BY\s+(\w+)(?:\s+(DESC))?)?(?:\s+LIMIT\s+(\d+))?\s*$',sql,re.I)
-        if m:
-            cols=[c.strip() for c in m[1].split(',')]
-            where=(m[3],m[4],m[5].strip("'\"")) if m[3] else None
-            order=('-'+m[6] if m[7] else m[6]) if m[6] else None
-            limit=int(m[8]) if m[8] else None
-            return db.select(m[2],cols,where,order,limit)
-    return "ERROR"
+"""sql_parser - SQL query engine for CSV files."""
+import argparse, csv, re, json, sys, operator
+
+OPS = {'=': operator.eq, '!=': operator.ne, '>': operator.gt, '<': operator.lt,
+       '>=': operator.ge, '<=': operator.le}
+
+def parse_query(sql):
+    sql = sql.strip().rstrip(';')
+    m = re.match(r'SELECT\s+(.+?)\s+FROM\s+(\S+)(?:\s+WHERE\s+(.+?))?(?:\s+ORDER\s+BY\s+(\S+)(?:\s+(ASC|DESC))?)?(?:\s+LIMIT\s+(\d+))?$', sql, re.I)
+    if not m: raise ValueError(f"Cannot parse: {sql}")
+    cols, table, where, order, direction, limit = m.groups()
+    return {
+        "columns": [c.strip() for c in cols.split(',')],
+        "table": table, "where": where, "order_by": order,
+        "descending": direction and direction.upper() == 'DESC',
+        "limit": int(limit) if limit else None
+    }
+
+def eval_where(row, where):
+    if not where: return True
+    m = re.match(r"(\w+)\s*(=|!=|>|<|>=|<=)\s*['\"]?([^'\"]+)['\"]?", where)
+    if not m: return True
+    col, op, val = m.groups()
+    rv = row.get(col, '')
+    try: rv, val = float(rv), float(val)
+    except: pass
+    return OPS[op](rv, val)
+
+def execute(query, rows):
+    filtered = [r for r in rows if eval_where(r, query['where'])]
+    if query['order_by']:
+        key = query['order_by']
+        def sort_key(r):
+            v = r.get(key, '')
+            try: return float(v)
+            except: return v
+        filtered.sort(key=sort_key, reverse=query.get('descending', False))
+    if query['limit']: filtered = filtered[:query['limit']]
+    cols = query['columns']
+    if cols == ['*']: cols = list(rows[0].keys()) if rows else []
+    return [{c: r.get(c, '') for c in cols} for r in filtered]
+
 def main():
-    db=DB()
-    sqls=["CREATE TABLE users (id, name, age)","INSERT INTO users VALUES (1, 'Alice', 30)",
-          "INSERT INTO users VALUES (2, 'Bob', 25)","INSERT INTO users VALUES (3, 'Carol', 35)",
-          "SELECT * FROM users","SELECT name, age FROM users WHERE age > 28",
-          "SELECT * FROM users ORDER BY age DESC LIMIT 2"]
-    for sql in sqls:
-        result=parse_execute(db,sql)
-        if isinstance(result,tuple):
-            cols,rows=result
-            print(f"\n{sql}")
-            print(f"  {cols}")
-            for r in rows: print(f"  {r}")
-        else: print(f"{sql} → {result}")
-if __name__=="__main__": main()
+    p = argparse.ArgumentParser(description="SQL for CSV")
+    p.add_argument("sql", help="SQL query (FROM = csv filename)")
+    p.add_argument("--json", action="store_true")
+    args = p.parse_args()
+    query = parse_query(args.sql)
+    with open(query['table']) as f: rows = list(csv.DictReader(f))
+    results = execute(query, rows)
+    if args.json:
+        print(json.dumps(results, indent=2))
+    else:
+        if results:
+            cols = list(results[0].keys())
+            print('\t'.join(cols))
+            for r in results: print('\t'.join(str(r[c]) for c in cols))
+        print(f"\n({len(results)} rows)")
+
+if __name__ == "__main__":
+    main()
