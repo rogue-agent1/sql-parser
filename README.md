@@ -1,11 +1,13 @@
-# sql-parser
+# SQL Parser
 
-SQL parser and query engine for CSV files.
-
-Zero dependencies. Python 3.8+.
+SQL Parser — zero-dependency, single-file Python CLI.
 
 ## Usage
 
 ```bash
 python3 sql_parser.py --help
 ```
+
+## License
+
+MIT
